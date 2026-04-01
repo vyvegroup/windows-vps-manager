@@ -11,13 +11,11 @@ jobs:
   stop:
     runs-on: ubuntu-latest
     steps:
-      - name: Cancel Running Workflow
+      - name: Cancel Workflow
         uses: styfle/cancel-workflow-action@0.12.1
         with:
           run_id: ${{ github.event.inputs.run_id }}
           access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Confirm Cancellation
-        run: |
-          echo "VPS with Run ID ${{ github.event.inputs.run_id }} has been stopped."
-          echo "The VPS will terminate within a few minutes."
+      - name: Done
+        run: echo "✅ VPS Run ${{ github.event.inputs.run_id }} stopped."
