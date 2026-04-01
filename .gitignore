@@ -1,5 +1,6 @@
-# Sensitive config files - NEVER commit these
-config.php
+# VPS Manager - Gitignore
+.vps_data/
 data/
-*.log
-.env
+config.php
+*.enc
+.htaccess
