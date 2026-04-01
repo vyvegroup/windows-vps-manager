@@ -1,0 +1,23 @@
+name: Stop VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'GitHub Run ID to cancel'
+        required: true
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Running Workflow
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          run_id: ${{ github.event.inputs.run_id }}
+          access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Confirm Cancellation
+        run: |
+          echo "VPS with Run ID ${{ github.event.inputs.run_id }} has been stopped."
+          echo "The VPS will terminate within a few minutes."
