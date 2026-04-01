@@ -1,0 +1,215 @@
+name: Provision Windows VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      vps_name:
+        description: 'VPS Name'
+        required: true
+        default: 'windows-vps-01'
+      rdp_password:
+        description: 'RDP Password (min 8 chars, must include uppercase, lowercase, number, special char)'
+        required: true
+        type: string
+      vps_lifetime:
+        description: 'VPS Lifetime (minutes) - Max 360 min (6 hours)'
+        required: true
+        default: '60'
+      ngrok_token:
+        description: 'Ngrok Auth Token (get from https://dashboard.ngrok.com/get-started/your-authtoken)'
+        required: false
+        type: string
+      timezone:
+        description: 'Timezone'
+        required: false
+        default: 'SE Asia Standard Time'
+
+env:
+  VPS_NAME: ${{ github.event.inputs.vps_name }}
+  RDP_PASSWORD: ${{ github.event.inputs.rdp_password }}
+  VPS_LIFETIME: ${{ github.event.inputs.vps_lifetime }}
+  NGROK_TOKEN: ${{ github.event.inputs.ngrok_token }}
+
+jobs:
+  provision:
+    runs-on: windows-latest
+    timeout-minutes: ${{ fromJson(github.event.inputs.vps_lifetime || '60') }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set VPS Name
+        run: |
+          echo "VPS_DISPLAY_NAME=$env:VPS_NAME" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_EXPIRES=$(Get-Date).AddMinutes($env:VPS_LIFETIME).ToString('yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_IP=$((Invoke-WebRequest -Uri 'https://api.ipify.org' -UseBasicParsing).Content)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_HOSTNAME=$env:COMPUTERNAME" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_OS=$((Get-CimInstance Win32_OperatingSystem).Caption)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_OS_VERSION=$((Get-CimInstance Win32_OperatingSystem).Version)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_CPU=$((Get-CimInstance Win32_Processor).Name)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_RAM_GB=[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VPS_DISK_GB=[math]::Round((Get-CimInstance Win32_LogicalDisk -Filter 'DeviceID=''C:''').Size / 1GB, 2)" | Out-File -FilePath $env:GITHUB_ENV -Append
+        shell: powershell
+
+      - name: Display VPS Info
+        run: |
+          echo "============================================"
+          echo "   VPS PROVISIONED SUCCESSFULLY"
+          echo "============================================"
+          echo "Name:       $env:VPS_DISPLAY_NAME"
+          echo "Hostname:   $env:VPS_HOSTNAME"
+          echo "OS:         $env:VPS_OS"
+          echo "IP:         $env:VPS_IP"
+          echo "CPU:        $env:VPS_CPU"
+          echo "RAM:        $env:VPS_RAM_GB GB"
+          echo "Disk:       $env:VPS_DISK_GB GB"
+          echo "Started:    $env:VPS_STARTED"
+          echo "Expires:    $env:VPS_EXPIRES"
+          echo "============================================"
+        shell: powershell
+
+      - name: Enable RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Enable-NetFirewallRule -DisplayGroup 'Core Networking'
+          netsh advfirewall firewall add rule name="RDP Port 3389" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP Port 3389 UDP" dir=in action=allow protocol=UDP localport=3389
+          
+          # Set RDP Password
+          $securePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          $username = "runneradmin"
+          Set-LocalUser -Name $username -Password $securePassword -PasswordNeverExpires $true
+          
+          # Configure RDP settings for better performance
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'MaxIdleTime' -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'fDisableClip' -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'fDisableAudioCapture' -Value 0
+          
+          # Enable PowerShell Remoting
+          Enable-PSRemoting -Force
+          
+          Write-Host "RDP Enabled Successfully"
+          Write-Host "Username: runneradmin"
+          Write-Host "Password: [SET]"
+        shell: powershell
+
+      - name: Install Ngrok & Create Tunnel
+        if: env.NGROK_TOKEN != ''
+        run: |
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath "C:\ngrok"
+          C:\ngrok\ngrok.exe authtoken $env:NGROK_TOKEN
+          Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp", "3389", "--region", "ap" -NoNewWindow
+          Start-Sleep -Seconds 5
+          $tunnelInfo = C:\ngrok\ngrok.exe tunnels list --json | ConvertFrom-Json
+          $ngrokUrl = ""
+          foreach ($tunnel in $tunnelInfo.tunnels) {
+              if ($tunnel.config.addr -eq "localhost:3389") {
+                  $ngrokUrl = $tunnel.public_url
+                  break
+              }
+          }
+          if (-not $ngrokUrl) {
+              # Fallback: get from API
+              $apiResponse = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
+              $ngrokUrl = $apiResponse.tunnels[0].public_url
+          }
+          echo "NGROK_RDP_URL=$ngrokUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "RDP via Ngrok: $ngrokUrl"
+        shell: powershell
+
+      - name: Install Common Tools
+        run: |
+          # Install Chocolatey
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          
+          # Install useful tools
+          choco install -y googlechrome --no-progress
+          choco install -y notepadplusplus --no-progress
+          choco install -y 7zip --no-progress
+          choco install -y vcredist-all --no-progress
+          choco install -y directx --no-progress
+          choco install -y python3 --no-progress
+          choco install -y nodejs --no-progress
+          
+          Write-Host "Common tools installed"
+        shell: powershell
+        continue-on-error: true
+
+      - name: Create Status File
+        run: |
+          $status = @{
+            vps_name = $env:VPS_DISPLAY_NAME
+            hostname = $env:VPS_HOSTNAME
+            os = $env:VPS_OS
+            ip = $env:VPS_IP
+            cpu = $env:VPS_CPU
+            ram_gb = $env:VPS_RAM_GB
+            disk_gb = $env:VPS_DISK_GB
+            started = $env:VPS_STARTED
+            expires = $env:VPS_EXPIRES
+            runner = "runneradmin"
+            rdp_password = $env:RDP_PASSWORD
+            ngrok_url = if ($env:NGROK_RDP_URL) { $env:NGROK_RDP_URL } else { "Not configured" }
+            github_run_id = "$env:GITHUB_RUN_ID"
+            github_run_number = "$env:GITHUB_RUN_NUMBER"
+            status = "running"
+          }
+          $status | ConvertTo-Json | Out-File -FilePath "vps-status.json" -Encoding UTF8
+          Get-Content "vps-status.json"
+        shell: powershell
+
+      - name: Keep VPS Alive
+        run: |
+          $endTime = (Get-Date).AddMinutes([int]$env:VPS_LIFETIME)
+          Write-Host "VPS will stay alive until: $endTime"
+          Write-Host "============================================"
+          Write-Host "   VPS CONNECTION DETAILS"
+          Write-Host "============================================"
+          if ($env:NGROK_RDP_URL -and $env:NGROK_RDP_URL -ne "") {
+              Write-Host "RDP via Ngrok: $env:NGROK_RDP_URL"
+              $ngrokHost = ($env:NGROK_RDP_URL -replace 'tcp://', '') -split ':' | Select-Object -First 1
+              $ngrokPort = ($env:NGROK_RDP_URL -replace 'tcp://', '') -split ':' | Select-Object -Last 1
+              Write-Host ""
+              Write-Host "Quick Connect (from Command Prompt):"
+              Write-Host "  mstsc /v:$ngrokHost`:$ngrokPort"
+          } else {
+              Write-Host "RDP Direct IP: $env:VPS_IP:3389"
+              Write-Host ""
+              Write-Host "NOTE: GitHub Actions runners have limited network access."
+              Write-Host "Direct RDP may not work. Use Ngrok for reliable access."
+              Write-Host "Get free Ngrok token at: https://dashboard.ngrok.com/get-started/your-authtoken"
+          }
+          Write-Host ""
+          Write-Host "Username: runneradmin"
+          Write-Host "============================================"
+          
+          while ((Get-Date) -lt $endTime) {
+            $remaining = ($endTime - (Get-Date)).TotalMinutes
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] VPS alive - ${remaining:N0} minutes remaining..."
+            Start-Sleep -Seconds 60
+          }
+          Write-Host "VPS lifetime expired. Shutting down..."
+        shell: powershell
+
+  report:
+    runs-on: ubuntu-latest
+    needs: provision
+    if: always()
+    steps:
+      - name: Send VPS Status Report
+        run: |
+          echo "============================================"
+          echo "   VPS PROVISIONING COMPLETE"
+          echo "============================================"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Run Number: ${{ github.run_number }}"
+          echo "Status: ${{ needs.provision.result }}"
+          echo "View logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "============================================"
